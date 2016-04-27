@@ -12,25 +12,13 @@ import (
 	"strings"
 )
 
-// Tee is the tee handle.
-type Tee struct {
-	laddr    string
-	backends []net.Conn
-}
-
-// New creates a new Tee.
-func New(laddr string, addrs []string) (t *Tee, err error) {
-	t = &Tee{laddr: laddr}
-	if err = t.Connect(addrs); err != nil {
-		return
-	}
-	return t, nil
-}
+// Backends is the backend connections.
+type Backends []net.Conn
 
 // Read implements the io.Reader.
-func (t *Tee) Read(p []byte) (n int, err error) {
-	for _, b := range t.backends {
-		n, err = b.Read(p)
+func (b Backends) Read(p []byte) (n int, err error) {
+	for _, conn := range b {
+		n, err = conn.Read(p)
 		if err != nil {
 			return n, err
 		}
@@ -39,9 +27,9 @@ func (t *Tee) Read(p []byte) (n int, err error) {
 }
 
 // Write implements the io.Writer.
-func (t *Tee) Write(p []byte) (n int, err error) {
-	for _, b := range t.backends {
-		n, err = b.Write(p)
+func (b Backends) Write(p []byte) (n int, err error) {
+	for _, conn := range b {
+		n, err = conn.Write(p)
 		if err != nil {
 			return n, err
 		}
@@ -49,28 +37,32 @@ func (t *Tee) Write(p []byte) (n int, err error) {
 	return
 }
 
-// Connect to backends.
-func (t *Tee) Connect(addrs []string) error {
-	for _, addr := range addrs {
-		conn, err := net.Dial("tcp", addr)
-		if err != nil {
-			return err
-		}
-		t.backends = append(t.backends, conn)
-		log.Printf("backend %s connected\n", addr)
+// Tee is the tee handle.
+type Tee struct {
+	ln    net.Listener
+	laddr string   // server addr
+	addrs []string // backend addrs
+}
+
+// New creates a new Tee.
+func New(laddr string, addrs []string) *Tee {
+	return &Tee{laddr: laddr, addrs: addrs}
+}
+
+// Listen the tee.
+func (t *Tee) Listen() (err error) {
+	t.ln, err = net.Listen("tcp", t.laddr)
+	if err != nil {
+		return err
 	}
+	log.Printf("tee is listening on %s\n", t.laddr)
 	return nil
 }
 
 // Serve the tee.
 func (t *Tee) Serve() error {
-	ln, err := net.Listen("tcp", t.laddr)
-	if err != nil {
-		return err
-	}
-	log.Printf("serving on %s\n", t.laddr)
 	for {
-		conn, err := ln.Accept()
+		conn, err := t.ln.Accept()
 		if err != nil {
 			return err
 		}
@@ -78,13 +70,29 @@ func (t *Tee) Serve() error {
 	}
 }
 
+// ListenAndServe is the Listen followed by Serve.
+func (t *Tee) ListenAndServe() (err error) {
+	if err = t.Listen(); err != nil {
+		return
+	}
+	return t.Serve()
+}
+
 // Handle the connection.
 func (t *Tee) handle(conn net.Conn) {
+	// Connect to backends
+	var backends []net.Conn
+	for _, addr := range t.addrs {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			log.Println(err)
+		}
+		backends = append(backends, c)
+	}
 	var err error
-	_, err = io.Copy(t, conn)
+	_, err = io.Copy(Backends(backends), conn)
 	if err != nil {
-		log.Printf("error: %v\n", err)
-		return
+		log.Println(err)
 	}
 }
 
@@ -95,9 +103,6 @@ func main() {
 	if *backends == "" {
 		log.Fatal("No backends")
 	}
-	tr, err := New(*bind, strings.Split(*backends, ","))
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Fatal(tr.Serve())
+	tr := New(*bind, strings.Split(*backends, ","))
+	log.Fatal(tr.ListenAndServe())
 }
